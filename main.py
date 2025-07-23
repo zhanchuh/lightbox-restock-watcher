@@ -1,11 +1,7 @@
 import os
 import time
-import base64
-import datetime
-import pytz
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
+import requests
+from bs4 import BeautifulSoup
 from mailjet_rest import Client
 
 CHECK_URL = os.getenv("CHECK_URL", "https://lightboxjewelry.com/collections/all")
@@ -27,29 +23,18 @@ def save_seen_products(products):
         for p in products:
             f.write(p + "\n")
 
-def send_email(subject, html_content, image_data_list):
+def send_email(subject, html_content):
     mailjet = Client(auth=(MJ_APIKEY_PUBLIC, MJ_APIKEY_PRIVATE), version='v3.1')
-
-    attachments = []
-    for i, img_data in enumerate(image_data_list):
-        attachments.append({
-            "ContentType": "image/png",
-            "Filename": f"product_{i}.png",
-            "Base64Content": img_data.decode('utf-8')
-        })
-
     data = {
         'Messages': [
             {
                 "From": {"Email": ALERT_EMAIL, "Name": "Lightbox Restock Bot"},
                 "To": [{"Email": ALERT_EMAIL}],
                 "Subject": subject,
-                "HTMLPart": html_content,
-                "Attachments": attachments
+                "HTMLPart": html_content
             }
         ]
     }
-
     result = mailjet.send.create(data=data)
     if result.status_code == 200:
         print("Alert email sent!")
@@ -57,75 +42,41 @@ def send_email(subject, html_content, image_data_list):
         print("Failed to send email:", result.status_code, result.json())
 
 def main():
-    print("Starting Lightbox restock watcher...")
+    print("Checking Lightbox products...")
 
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--window-size=1920,1080")
+    seen_products = load_seen_products()
+    print(f"Loaded {len(seen_products)} seen products.")
 
-    driver = webdriver.Chrome(options=options)
+    resp = requests.get(CHECK_URL)
+    if resp.status_code != 200:
+        print(f"Failed to fetch page: {resp.status_code}")
+        return
 
-    try:
-        seen_products = load_seen_products()
-        print(f"Loaded {len(seen_products)} seen products.")
+    soup = BeautifulSoup(resp.text, "html.parser")
+    product_links = set()
 
-        driver.get(CHECK_URL)
-        time.sleep(5)  # wait for page load
+    # Adjust selector if needed, this matches product links on Lightbox site
+    for a in soup.select("a.grid-product__link"):
+        href = a.get("href")
+        if href and href.startswith("/products/"):
+            full_link = "https://lightboxjewelry.com" + href
+            product_links.add(full_link)
 
-        product_elements = driver.find_elements(By.CSS_SELECTOR, "div.grid-product")
+    new_products = product_links - seen_products
 
-        new_products = []
-        images_base64 = []
+    if new_products:
+        print(f"Found {len(new_products)} new products!")
+        html_content = "<h2>Lightbox New/Restocked Products Detected:</h2><ul>"
+        for link in new_products:
+            html_content += f'<li><a href="{link}">{link}</a></li>'
+        html_content += "</ul>"
 
-        for product in product_elements:
-            try:
-                link_el = product.find_element(By.CSS_SELECTOR, "a.grid-product__link")
-                product_link = link_el.get_attribute("href")
+        send_email("Lightbox Restock Alert", html_content)
 
-                if product_link not in seen_products:
-                    print(f"New product detected: {product_link}")
-                    new_products.append(product_link)
-
-                    driver.execute_script("arguments[0].scrollIntoView(true);", product)
-                    time.sleep(1)
-
-                    screenshot = product.screenshot_as_png
-                    encoded_img = base64.b64encode(screenshot)
-                    images_base64.append(encoded_img)
-
-                    seen_products.add(product_link)
-
-            except Exception as e:
-                print("Error processing product element:", e)
-
-        if new_products:
-            html_content = "<h2>Lightbox New/Restocked Products Detected:</h2><ul>"
-            for i, link in enumerate(new_products):
-                html_content += f'<li><a href="{link}">{link}</a><br><img src="cid:product_{i}.png" style="max-width:400px"/></li>'
-            html_content += "</ul>"
-
-            send_email("Lightbox Restock Alert", html_content, images_base64)
-            save_seen_products(seen_products)
-        else:
-            print("No new or restocked products.")
-
-    finally:
-        driver.quit()
+        seen_products.update(new_products)
+        save_seen_products(seen_products)
+    else:
+        print("No new or restocked products.")
 
 if __name__ == "__main__":
-    est = pytz.timezone('US/Eastern')
-
-    while True:
-        now = datetime.datetime.now(est)
-        # Run between 7:00 AM - 11:59 PM and 12:00 AM - 2:59 AM (3 AM)
-        if (7 <= now.hour <= 23) or (0 <= now.hour < 3):
-            print(f"Current time {now.strftime('%H:%M:%S')} EST - Running check...")
-            main()
-            print("Sleeping 10 minutes...")
-            time.sleep(600)  # 10 minutes
-        else:
-            # Sleep longer outside active hours (3 AM - 7 AM)
-            print(f"Current time {now.strftime('%H:%M:%S')} EST - Outside active hours, sleeping 30 minutes...")
-            time.sleep(1800)
+    main()
