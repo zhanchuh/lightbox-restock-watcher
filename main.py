@@ -1,149 +1,119 @@
-import requests
-from bs4 import BeautifulSoup
-import smtplib
-import json
-import time
 import os
-import ssl
-from email.message import EmailMessage
+import time
+import base64
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.common.by import By
+from mailjet_rest import Client
 
-COLLECTION_URL = "https://www.lightboxjewelry.com/collections/all"
-CHECK_INTERVAL = 1800  # 30 minutes
+CHECK_URL = os.getenv("CHECK_URL", "https://lightboxjewelry.com/collections/all")
+ALERT_EMAIL = os.getenv("ALERT_EMAIL")
 
-EMAIL_FROM = os.environ["EMAIL_FROM"]
-EMAIL_TO = os.environ["EMAIL_TO"]
-EMAIL_PASSWORD = os.environ["EMAIL_PASSWORD"]
+MJ_APIKEY_PUBLIC = os.getenv("MJ_APIKEY_PUBLIC")
+MJ_APIKEY_PRIVATE = os.getenv("MJ_APIKEY_PRIVATE")
 
-SNAPSHOT_FILE = "product_snapshot.json"
+SEEN_PRODUCTS_FILE = "seen_products.txt"
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
+def load_seen_products():
+    if not os.path.exists(SEEN_PRODUCTS_FILE):
+        return set()
+    with open(SEEN_PRODUCTS_FILE, "r") as f:
+        return set(line.strip() for line in f.readlines())
 
-def fetch_products():
-    response = requests.get(COLLECTION_URL, headers=HEADERS)
-    soup = BeautifulSoup(response.content, "html.parser")
+def save_seen_products(products):
+    with open(SEEN_PRODUCTS_FILE, "w") as f:
+        for p in products:
+            f.write(p + "\n")
 
-    products = {}
-    product_cards = soup.find_all("a", class_="ProductItem__ImageWrapper")  # Confirm class if needed
+def send_email(subject, html_content, image_data_list):
+    mailjet = Client(auth=(MJ_APIKEY_PUBLIC, MJ_APIKEY_PRIVATE), version='v3.1')
 
-    for card in product_cards:
-        product_url = "https://www.lightboxjewelry.com" + card['href']
-        title = card.get("aria-label") or card.img.get("alt", "Unknown Product")
+    attachments = []
+    for i, img_data in enumerate(image_data_list):
+        attachments.append({
+            "ContentType": "image/png",
+            "Filename": f"product_{i}.png",
+            "Base64Content": img_data.decode('utf-8')
+        })
 
-        product_page = requests.get(product_url, headers=HEADERS)
-        product_soup = BeautifulSoup(product_page.content, "html.parser")
-        in_stock = "Add to Bag" in product_soup.text  # Adjust if necessary
+    data = {
+        'Messages': [
+            {
+                "From": {"Email": ALERT_EMAIL, "Name": "Lightbox Restock Bot"},
+                "To": [{"Email": ALERT_EMAIL}],
+                "Subject": subject,
+                "HTMLPart": html_content,
+                "Attachments": attachments
+            }
+        ]
+    }
 
-        products[title] = {
-            "url": product_url,
-            "in_stock": in_stock
-        }
+    result = mailjet.send.create(data=data)
+    if result.status_code == 200:
+        print("Alert email sent!")
+    else:
+        print("Failed to send email:", result.status_code, result.json())
 
-    return products
-
-def load_snapshot():
-    if os.path.exists(SNAPSHOT_FILE):
-        with open(SNAPSHOT_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-def save_snapshot(data):
-    with open(SNAPSHOT_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-def capture_screenshot(url, title):
-    os.makedirs("screenshots", exist_ok=True)
-    filename = f"{title[:50].replace(' ', '_').replace('/', '')}.png"
-    path = os.path.join("screenshots", filename)
+def main():
+    print("Starting Lightbox restock watcher...")
 
     options = Options()
     options.add_argument("--headless")
+    options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1200,800")
+    options.add_argument("--window-size=1920,1080")
 
-    driver = webdriver.Chrome(ChromeDriverManager().install(), options=options)
-    driver.get(url)
-    time.sleep(3)
-    driver.save_screenshot(path)
-    driver.quit()
+    driver = webdriver.Chrome(options=options)
 
-    return path
+    try:
+        seen_products = load_seen_products()
+        print(f"Loaded {len(seen_products)} seen products.")
 
-def send_email_with_attachments(subject, body, image_paths):
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = EMAIL_FROM
-    msg["To"] = EMAIL_TO
-    msg.set_content(body)
+        driver.get(CHECK_URL)
+        time.sleep(5)  # wait for page load
 
-    for image_path in image_paths:
-        with open(image_path, "rb") as f:
-            img_data = f.read()
-            msg.add_attachment(
-                img_data,
-                maintype="image",
-                subtype="png",
-                filename=os.path.basename(image_path)
-            )
+        product_elements = driver.find_elements(By.CSS_SELECTOR, "div.grid-product")
 
-    context = ssl.create_default_context()
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
-        server.login(EMAIL_FROM, EMAIL_PASSWORD)
-        server.send_message(msg)
+        new_products = []
+        images_base64 = []
 
-def compare_snapshots(old, new):
-    restocks = []
-    new_products = []
+        for product in product_elements:
+            try:
+                link_el = product.find_element(By.CSS_SELECTOR, "a.grid-product__link")
+                product_link = link_el.get_attribute("href")
 
-    for name, info in new.items():
-        if name not in old:
-            new_products.append((name, info))
-        elif not old[name]["in_stock"] and info["in_stock"]:
-            restocks.append((name, info))
+                if product_link not in seen_products:
+                    print(f"New product detected: {product_link}")
+                    new_products.append(product_link)
 
-    return restocks, new_products
+                    driver.execute_script("arguments[0].scrollIntoView(true);", product)
+                    time.sleep(1)
 
-def main():
-    while True:
-        try:
-            print("Checking Lightbox products...")
-            new_snapshot = fetch_products()
-            old_snapshot = load_snapshot()
+                    screenshot = product.screenshot_as_png
+                    encoded_img = base64.b64encode(screenshot)
+                    images_base64.append(encoded_img)
 
-            restocks, new_products = compare_snapshots(old_snapshot, new_snapshot)
+                    seen_products.add(product_link)
 
-            all_changes = restocks + new_products
+            except Exception as e:
+                print("Error processing product element:", e)
 
-            if all_changes:
-                image_paths = []
-                email_lines = []
+        if new_products:
+            html_content = "<h2>Lightbox New/Restocked Products Detected:</h2><ul>"
+            for i, link in enumerate(new_products):
+                html_content += f'<li><a href="{link}">{link}</a><br><img src="cid:product_{i}.png" style="max-width:400px"/></li>'
+            html_content += "</ul>"
 
-                for label, (name, info) in zip(
-                    ["RESTOCKED"] * len(restocks) + ["NEW"] * len(new_products),
-                    all_changes
-                ):
-                    line = f"{label}: {name}\n{info['url']}"
-                    email_lines.append(line)
-                    image_paths.append(capture_screenshot(info["url"], name))
+            send_email("Lightbox Restock Alert", html_content, images_base64)
+            save_seen_products(seen_products)
+        else:
+            print("No new or restocked products.")
 
-                body = "\n\n".join(email_lines)
-                send_email_with_attachments("🔔 Lightbox Alert: New or Restocked Products", body, image_paths)
-                print("Email sent with screenshots.")
-
-            else:
-                print("No new or restocked products.")
-
-            save_snapshot(new_snapshot)
-
-        except Exception as e:
-            print(f"Error: {e}")
-
-        time.sleep(CHECK_INTERVAL)
+    finally:
+        driver.quit()
 
 if __name__ == "__main__":
-    main()
+    while True:
+        main()
+        print("Sleeping for 30 minutes...")
+        time.sleep(1800)
