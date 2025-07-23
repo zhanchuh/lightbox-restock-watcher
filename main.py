@@ -4,14 +4,11 @@ import requests
 from bs4 import BeautifulSoup
 from mailjet_rest import Client
 from datetime import datetime
-import pytz
 
 CHECK_URL = os.getenv("CHECK_URL", "https://lightboxjewelry.com/collections/all")
 ALERT_EMAIL = os.getenv("ALERT_EMAIL")
-
 MJ_APIKEY_PUBLIC = os.getenv("MJ_APIKEY_PUBLIC")
 MJ_APIKEY_PRIVATE = os.getenv("MJ_APIKEY_PRIVATE")
-
 SEEN_PRODUCTS_FILE = "seen_products.txt"
 
 def load_seen_products():
@@ -43,14 +40,18 @@ def send_email(subject, html_content):
     else:
         print("❌ Failed to send email:", result.status_code, result.json())
 
-def check_lightbox():
+def check_products():
+    print(f"\nCurrent time {datetime.now().strftime('%H:%M:%S %Z')} - Running check...")
     print("Checking Lightbox products...")
+
     seen_products = load_seen_products()
     print(f"Loaded {len(seen_products)} seen products.")
 
-    resp = requests.get(CHECK_URL)
-    if resp.status_code != 200:
-        print(f"❌ Failed to fetch page: {resp.status_code}")
+    try:
+        resp = requests.get(CHECK_URL)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"❌ Error fetching URL: {e}")
         return
 
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -80,14 +81,13 @@ def check_lightbox():
 
 def main():
     while True:
-        now = datetime.now(pytz.timezone("US/Eastern"))
-        if 7 <= now.hour or now.hour < 3:
-            print(f"Current time {now.strftime('%H:%M:%S')} EST - Running check...\n")
-            check_lightbox()
+        current_hour = datetime.now().hour
+        if 7 <= current_hour or current_hour < 3:  # 7 AM to 2:59 AM EST
+            check_products()
         else:
-            print(f"Current time {now.strftime('%H:%M:%S')} EST - Outside active hours.\n")
+            print("⏰ Outside of check hours (7AM–3AM EST), skipping this run.")
 
-        time.sleep(600)  # Wait 10 minutes
+        time.sleep(600)  # Sleep for 10 minutes
 
 if __name__ == "__main__":
     main()
