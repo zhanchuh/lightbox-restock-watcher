@@ -1,6 +1,8 @@
 import os
 import time
 import base64
+import datetime
+import pytz
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -113,7 +115,17 @@ def main():
         driver.quit()
 
 if __name__ == "__main__":
+    est = pytz.timezone('US/Eastern')
+
     while True:
-        main()
-        print("Sleeping for 30 minutes...")
-        time.sleep(1800)
+        now = datetime.datetime.now(est)
+        # Run between 7:00 AM - 11:59 PM and 12:00 AM - 2:59 AM (3 AM)
+        if (7 <= now.hour <= 23) or (0 <= now.hour < 3):
+            print(f"Current time {now.strftime('%H:%M:%S')} EST - Running check...")
+            main()
+            print("Sleeping 10 minutes...")
+            time.sleep(600)  # 10 minutes
+        else:
+            # Sleep longer outside active hours (3 AM - 7 AM)
+            print(f"Current time {now.strftime('%H:%M:%S')} EST - Outside active hours, sleeping 30 minutes...")
+            time.sleep(1800)
