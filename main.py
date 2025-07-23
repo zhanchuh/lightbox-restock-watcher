@@ -3,6 +3,8 @@ import time
 import requests
 from bs4 import BeautifulSoup
 from mailjet_rest import Client
+from datetime import datetime
+import pytz
 
 CHECK_URL = os.getenv("CHECK_URL", "https://lightboxjewelry.com/collections/all")
 ALERT_EMAIL = os.getenv("ALERT_EMAIL")
@@ -41,9 +43,8 @@ def send_email(subject, html_content):
     else:
         print("❌ Failed to send email:", result.status_code, result.json())
 
-def main():
+def check_lightbox():
     print("Checking Lightbox products...")
-
     seen_products = load_seen_products()
     print(f"Loaded {len(seen_products)} seen products.")
 
@@ -76,6 +77,17 @@ def main():
         save_seen_products(seen_products)
     else:
         print("No new or restocked products.")
+
+def main():
+    while True:
+        now = datetime.now(pytz.timezone("US/Eastern"))
+        if 7 <= now.hour or now.hour < 3:
+            print(f"Current time {now.strftime('%H:%M:%S')} EST - Running check...\n")
+            check_lightbox()
+        else:
+            print(f"Current time {now.strftime('%H:%M:%S')} EST - Outside active hours.\n")
+
+        time.sleep(600)  # Wait 10 minutes
 
 if __name__ == "__main__":
     main()
