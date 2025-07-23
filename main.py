@@ -37,9 +37,9 @@ def send_email(subject, html_content):
     }
     result = mailjet.send.create(data=data)
     if result.status_code == 200:
-        print("Alert email sent!")
+        print("✅ Alert email sent!")
     else:
-        print("Failed to send email:", result.status_code, result.json())
+        print("❌ Failed to send email:", result.status_code, result.json())
 
 def main():
     print("Checking Lightbox products...")
@@ -49,30 +49,29 @@ def main():
 
     resp = requests.get(CHECK_URL)
     if resp.status_code != 200:
-        print(f"Failed to fetch page: {resp.status_code}")
+        print(f"❌ Failed to fetch page: {resp.status_code}")
         return
 
     soup = BeautifulSoup(resp.text, "html.parser")
     product_links = set()
 
-    # Adjust selector if needed, this matches product links on Lightbox site
-    for a in soup.select("a.grid-product__link"):
-        href = a.get("href")
-        if href and href.startswith("/products/"):
-            full_link = "https://lightboxjewelry.com" + href
-            product_links.add(full_link)
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if "/collections/all/products/" in href:
+            if not href.startswith("http"):
+                href = "https://lightboxjewelry.com" + href
+            product_links.add(href.split("?")[0])  # Ignore variant/query params
 
     new_products = product_links - seen_products
 
     if new_products:
-        print(f"Found {len(new_products)} new products!")
-        html_content = "<h2>Lightbox New/Restocked Products Detected:</h2><ul>"
+        print(f"🚨 Found {len(new_products)} new product(s)!")
+        html_content = "<h2>🆕 Lightbox Restocked or New Products:</h2><ul>"
         for link in new_products:
             html_content += f'<li><a href="{link}">{link}</a></li>'
         html_content += "</ul>"
 
-        send_email("Lightbox Restock Alert", html_content)
-
+        send_email("🛍️ Lightbox Restock Alert", html_content)
         seen_products.update(new_products)
         save_seen_products(seen_products)
     else:
