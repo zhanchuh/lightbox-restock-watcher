@@ -9,85 +9,69 @@ CHECK_URL = os.getenv("CHECK_URL", "https://lightboxjewelry.com/collections/all"
 ALERT_EMAIL = os.getenv("ALERT_EMAIL")
 MJ_APIKEY_PUBLIC = os.getenv("MJ_APIKEY_PUBLIC")
 MJ_APIKEY_PRIVATE = os.getenv("MJ_APIKEY_PRIVATE")
-SEEN_PRODUCTS_FILE = "seen_products.txt"
 
-def load_seen_products():
-    if not os.path.exists(SEEN_PRODUCTS_FILE):
-        return set()
-    with open(SEEN_PRODUCTS_FILE, "r") as f:
-        return set(line.strip() for line in f.readlines())
+last_seen_links = set()
 
-def save_seen_products(products):
-    with open(SEEN_PRODUCTS_FILE, "w") as f:
-        for p in products:
-            f.write(p + "\n")
-
-def send_email(subject, html_content):
+def send_email(subject, new_links):
     mailjet = Client(auth=(MJ_APIKEY_PUBLIC, MJ_APIKEY_PRIVATE), version='v3.1')
+    html_content = "<h2>🆕 New Lightbox Products:</h2><ul>"
+    for link in sorted(new_links):
+        html_content += f'<li><a href="{link}">{link}</a></li>'
+    html_content += "</ul>"
+
     data = {
-        'Messages': [
-            {
-                "From": {"Email": ALERT_EMAIL, "Name": "Lightbox Restock Bot"},
-                "To": [{"Email": ALERT_EMAIL}],
-                "Subject": subject,
-                "HTMLPart": html_content
-            }
-        ]
+        'Messages': [{
+            "From": {"Email": ALERT_EMAIL, "Name": "Lightbox Restock Bot"},
+            "To":   [{"Email": ALERT_EMAIL}],
+            "Subject": subject,
+            "HTMLPart": html_content
+        }]
     }
-    result = mailjet.send.create(data=data)
-    if result.status_code == 200:
+
+    res = mailjet.send.create(data=data)
+    if res.status_code == 200:
         print("✅ Alert email sent!")
     else:
-        print("❌ Failed to send email:", result.status_code, result.json())
+        print("❌ Email failed:", res.status_code, res.json())
 
 def check_products():
-    print(f"\nCurrent time {datetime.now().strftime('%H:%M:%S %Z')} - Running check...")
-    print("Checking Lightbox products...")
-
-    seen_products = load_seen_products()
-    print(f"Loaded {len(seen_products)} seen products.")
+    global last_seen_links
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{now}] Checking Lightbox…")
 
     try:
-        resp = requests.get(CHECK_URL)
-        resp.raise_for_status()
+        r = requests.get(CHECK_URL)
+        r.raise_for_status()
     except Exception as e:
-        print(f"❌ Error fetching URL: {e}")
+        print("❌ Fetch error:", e)
         return
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    product_links = set()
+    soup = BeautifulSoup(r.text, "html.parser")
+    current_links = {
+        ("https://lightboxjewelry.com" + a["href"].split("?")[0])
+        if a["href"].startswith("/collections/all/products/")
+        else a["href"].split("?")[0]
+        for a in soup.find_all("a", href=True)
+        if "/collections/all/products/" in a["href"]
+    }
 
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if "/collections/all/products/" in href:
-            if not href.startswith("http"):
-                href = "https://lightboxjewelry.com" + href
-            product_links.add(href.split("?")[0])  # Ignore variant/query params
-
-    new_products = product_links - seen_products
-
-    if new_products:
-        print(f"🚨 Found {len(new_products)} new product(s)!")
-        html_content = "<h2>🆕 Lightbox Restocked or New Products:</h2><ul>"
-        for link in new_products:
-            html_content += f'<li><a href="{link}">{link}</a></li>'
-        html_content += "</ul>"
-
-        send_email("🛍️ Lightbox Restock Alert", html_content)
-        seen_products.update(new_products)
-        save_seen_products(seen_products)
+    new_links = current_links - last_seen_links
+    if new_links:
+        print(f"🚨 Detected {len(new_links)} new link(s).")
+        send_email("🛍️ Lightbox Restock Alert", new_links)
+        last_seen_links = current_links
     else:
-        print("No new or restocked products.")
+        print("✅ No changes.")
 
 def main():
     while True:
-        current_hour = datetime.now().hour
-        if 7 <= current_hour or current_hour < 3:  # 7 AM to 2:59 AM EST
+        hour = datetime.now().hour
+        # Active window: 4 AM <= hour < 15 (3 PM)
+        if 4 <= hour < 15:
             check_products()
         else:
-            print("⏰ Outside of check hours (7AM–3AM EST), skipping this run.")
-
-        time.sleep(600)  # Sleep for 10 minutes
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Outside 4 AM–3 PM PST, skipping.")
+        time.sleep(1)  # run every second
 
 if __name__ == "__main__":
     main()
